@@ -415,7 +415,7 @@
   "Run read-write operations from/to a rgister against a cluster to check with Elle"
   [hosts time-base register-set thread_id count max-ops-per-tx process-counter read-timeout]
   (try
-    (let [cluster (alia/cluster {:contact-points hosts. :socket-options {:read-timeout read-timeout} })
+    (let [cluster (alia/cluster {:contact-points hosts, :socket-options {:read-timeout read-timeout} })
           session (alia/connect cluster)
           _ (alia/execute session "USE accord;")
           corrected-time (fn [] (+ time-base (linear-time-nanos)))
