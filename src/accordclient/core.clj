@@ -6,6 +6,7 @@
   (:import (com.datastax.driver.core.exceptions UnavailableException
                                                 WriteTimeoutException
                                                 ReadTimeoutException
+                                                OperationTimedOutException
                                                 NoHostAvailableException))
   (:gen-class))
 
@@ -35,13 +36,16 @@
     :parse-fn #(Integer/parseInt %)
     :validate [#(< -1 %) "Must be greater than or equal to 0"]]
    ["-p" "--print-schema" "Schema to use for cluster under load"]
+   [nil "--read-timeout TIME" "Driver read timeout"
+    :default 12000
+    :parse-fn #(Long/parseLong %)]
    ["-H" "--hosts HOSTS" "Hosts to contact"
     :default ["localhost"]
     :parse-fn #(str/split % #",")
     :validate [#(seq %) "Must provide at least one host"]]
-   ["-casr" "--cas-register"]
-   ["-rwr" "--rw-register"]
-   ["-la" "--list-append"]
+   [nil "--cas-register"]
+   [nil "--rw-register"]
+   [nil "--list-append"]
    ["-h" "--help"]])
 
 (def ak (keyword "row.contents"))
@@ -81,6 +85,7 @@
      (instance? UnavailableException driver-exception) (assoc op :type :fail :cause :unavailable)
      (instance? ReadTimeoutException driver-exception) (assoc op :type :info :cause :read-timed-out)
      (instance? WriteTimeoutException driver-exception) (assoc op :type :info :cause :write-timed-out)
+     (instance? OperationTimedOutException driver-exception) (assoc op :type :info :cause :op-timed-out) ; thrown by the client when it didn’t hear back from the coordinator within the driver read timeout
      (instance? NoHostAvailableException driver-exception) (do (Thread/sleep 1000) (assoc op :type :fail :cause :nohost))
      :else (assoc op :type :error :cause :unhandled-exception :details (.toString exception))
      )
@@ -143,9 +148,9 @@
 
 (defn do-cas-register-writes
   "Run CAS operations against a cluster and check with Knossos"
-  [hosts time-base register-set upper-bound count process-counter]
+  [hosts time-base register-set upper-bound count process-counter read-timeout]
   (try
-    (let [cluster (alia/cluster {:contact-points hosts})
+    (let [cluster (alia/cluster {:contact-points hosts, :socket-options {:read-timeout read-timeout}})
           session (alia/connect cluster)
           _ (alia/execute session "USE accord;")
           corrected-time (fn [] (+ time-base (linear-time-nanos)))
@@ -251,9 +256,9 @@
 
 (defn do-list-append-writes
   "Run read-append operations from/to a list against a cluster to check with Elle"
-  [hosts time-base register-set thread_id count process-counter]
+  [hosts time-base register-set thread_id count process-counter read-timeout]
   (try
-    (let [cluster (alia/cluster {:contact-points hosts})
+    (let [cluster (alia/cluster {:contact-points hosts, :socket-options {:read-timeout read-timeout}})
           session (alia/connect cluster)
           _ (alia/execute session "USE accord;")
           corrected-time (fn [] (+ time-base (linear-time-nanos)))
@@ -408,9 +413,9 @@
 
 (defn do-rw-register-writes
   "Run read-write operations from/to a rgister against a cluster to check with Elle"
-  [hosts time-base register-set thread_id count max-ops-per-tx process-counter]
+  [hosts time-base register-set thread_id count max-ops-per-tx process-counter read-timeout]
   (try
-    (let [cluster (alia/cluster {:contact-points hosts})
+    (let [cluster (alia/cluster {:contact-points hosts. :socket-options {:read-timeout read-timeout} })
           session (alia/connect cluster)
           _ (alia/execute session "USE accord;")
           corrected-time (fn [] (+ time-base (linear-time-nanos)))
@@ -567,35 +572,35 @@
       errors (do (println summary) (println errors) (System/exit 1))
       (:cas-register options) (do
         (let [{:keys [hosts start-time upper-bound register-set
-                      operation-count thread-count]} options
+                      operation-count thread-count read-timeout]} options
                       count (quot operation-count thread-count)
                       process-counter (atom 0)
                       modified-start-time (- start-time (linear-time-nanos))]
           (dotimes [_ thread-count]
-            (future (do-cas-register-writes hosts modified-start-time register-set upper-bound count process-counter)))
+            (future (do-cas-register-writes hosts modified-start-time register-set upper-bound count process-counter read-timeout)))
           (shutdown-agents))
 
         )
 
       (:rw-register options) (do
         (let [{:keys [hosts start-time register-set
-                      operation-count thread-count]} options
+                      operation-count thread-count read-timeout]} options
                       count (quot operation-count thread-count)
                       process-counter (atom 0)
                       max-ops-per-tx 5
                       modified-start-time (- start-time (linear-time-nanos))]
           (dotimes [thread_id thread-count]
-            (future (do-rw-register-writes hosts modified-start-time register-set thread_id count max-ops-per-tx process-counter)))
+            (future (do-rw-register-writes hosts modified-start-time register-set thread_id count max-ops-per-tx process-counter read-timeout)))
           (shutdown-agents))
       )
       (:list-append options) (do
         (let [{:keys [hosts start-time register-set
-                      operation-count thread-count]} options
+                      operation-count thread-count read-timeout]} options
                       count (quot operation-count thread-count)
                       process-counter (atom 0)
                       modified-start-time (- start-time (linear-time-nanos))]
           (dotimes [thread_id thread-count]
-            (future (do-list-append-writes hosts modified-start-time register-set thread_id count process-counter)))
+            (future (do-list-append-writes hosts modified-start-time register-set thread_id count process-counter read-timeout)))
           (shutdown-agents))
       )
       :else
