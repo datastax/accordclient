@@ -85,7 +85,7 @@
      (instance? UnavailableException driver-exception) (assoc op :type :fail :cause :unavailable)
      (instance? ReadTimeoutException driver-exception) (assoc op :type :info :cause :read-timed-out)
      (instance? WriteTimeoutException driver-exception) (assoc op :type :info :cause :write-timed-out)
-     (instance? OperationTimedOutException driver-exception) (assoc op :type :info :cause :op-timed-out) ; thrown by the client when it didn’t hear back from the coordinator within the driver read timeout
+     (instance? OperationTimedOutException driver-exception) (assoc op :type :info :cause :op-timed-out) ; thrown by the client when it didn’t hear back from the coordinator within the driver read timeout (default 12s)
      (instance? NoHostAvailableException driver-exception) (do (Thread/sleep 1000) (assoc op :type :fail :cause :nohost))
      :else (assoc op :type :error :cause :unhandled-exception :details (.toString exception))
      )
@@ -240,9 +240,71 @@
 
 (defn la-write
   "Single write to the list-append model"
-  [session stmt op]
+  [session stmt-tmpl op]
   (try
     (let [
+           register (get-in (:value op) [0 1])
+           register-value (get-in (:value op) [0 2])
+           stmt (format stmt-tmpl register-value register)
+           result (alia/execute session stmt)
+           ]
+      (if (= [] (-> result first ak))
+        (assoc op :type :ok)
+        (assoc op :type :fail)))
+    (catch Exception e
+      (handle-driver-exceptions e op)
+      )
+    )
+  )
+
+(defn la-single-rr-mix
+  "Double read from the list-append model"
+  [session pst op]
+  (try
+    (let [
+           r1-register (get-in (:value op) [0 1])
+           r2-register (get-in (:value op) [1 1])
+           result (alia/execute session pst {:values [r1-register r2-register]})
+           r1-result (-> result first ak1)
+           r2-result (-> result first ak2)
+           ]
+      (assoc (assoc-in (assoc-in op [:value 0 2] r1-result) [:value 1 2] r2-result) :type :ok)
+      )
+    (catch Exception e
+      (handle-driver-exceptions e op)
+      )
+    )
+  )
+
+(defn la-single-rw-mix
+  "Read followed by write to the list-append model"
+  [session stmt-tmpl op]
+  (try
+    (let [
+           r-register (get-in (:value op) [0 1])
+           w-register (get-in (:value op) [1 1])
+           w-register-value (get-in (:value op) [1 2])
+           stmt (format stmt-tmpl r-register w-register-value w-register)
+           result (-> (alia/execute session stmt) first ak)
+           ]
+      (assoc (assoc-in op [:value 0 2] result) :type :ok)
+      )
+    (catch Exception e
+      (handle-driver-exceptions e op)
+      )
+    )
+  )
+
+(defn la-single-ww-mix
+  "Double write to the list-append model"
+  [session stmt-tmpl op]
+  (try
+    (let [
+           register1 (get-in (:value op) [0 1])
+           register1-value (get-in (:value op) [0 2])
+           register2 (get-in (:value op) [1 1])
+           register2-value (get-in (:value op) [1 2])
+           stmt (format stmt-tmpl register1-value register1, register2-value register2)
            result (alia/execute session stmt)
            ]
       (if (= [] (-> result first ak))
@@ -256,7 +318,7 @@
 
 (defn do-list-append-writes
   "Run read-append operations from/to a list against a cluster to check with Elle"
-  [hosts time-base register-set thread_id count process-counter read-timeout]
+  [hosts time-base register-set thread_id count max-ops-per-tx process-counter read-timeout]
   (try
     (let [cluster (alia/cluster {:contact-points hosts, :socket-options {:read-timeout read-timeout}})
           session (alia/connect cluster)
@@ -276,16 +338,76 @@
               UPDATE list_append SET contents += [%d] WHERE id = %d;
             END IF
           COMMIT TRANSACTION;"
+
+          prepared-single-rr-mix (alia/prepare session "
+          BEGIN TRANSACTION
+            LET row1 = (SELECT * FROM list_append WHERE id=?);
+            LET row2 = (SELECT * FROM list_append WHERE id=?);
+            SELECT row1.contents,row2.contents;
+          COMMIT TRANSACTION;"
+                                               )
+          single-rw-mix-stmt-tmpl "
+          BEGIN TRANSACTION
+            LET row = (SELECT * FROM list_append WHERE id=%d);
+            SELECT row.contents;
+            UPDATE list_append SET contents += [%d] WHERE id = %d;
+          COMMIT TRANSACTION;"
+
+          single-ww-mix-stmt-tmpl "
+          BEGIN TRANSACTION
+            LET row = (SELECT * FROM list_append WHERE id=0);
+            SELECT row.contents;
+            UPDATE list_append SET contents += [%d] WHERE id = %d;
+            UPDATE list_append SET contents += [%d] WHERE id = %d;
+          COMMIT TRANSACTION;"
+
+          threshold (* max-ops-per-tx thread_id count) ; max number of values to be used for a single thread; this helps to assign unique values for each thread, so they do not reuse values
           ]
       (loop [n 1
+             v (atom 1)
              my-process (swap! process-counter inc)]
-        (let [f (rand-nth [:read :write])
-              register (rand-nth register-set)
-              register-value (+ (* thread_id count) n) ;makes value unique across all threads
-              write-stmt (format write-stmt-tmpl register-value register)
+        (let [f (rand-nth [:read :write, :single-ww-mix, :single-rr-mix, :single-rw-mix])
               value (case f
-                          :read [[:r register nil]]
-                          :write [[:append register register-value]])
+                          :read
+                          (let [register (rand-nth register-set)]
+                            [[:r register nil]]
+                            )
+                          :write
+                          (let [
+                                 register (rand-nth register-set)
+                                 register-value (+ threshold @v) ;makes value unique across all threads
+                                 ]
+                            (swap! v inc)
+                            [[:append register register-value]]
+                            )
+                          :single-rr-mix
+                          (let [
+                                 r1-register (rand-nth register-set)
+                                 r2-register (rand-nth register-set)
+                                 ]
+                            [[:r r1-register nil] [:r r2-register nil]]
+                            )
+                          :single-rw-mix
+                          (let [
+                                 r-register (rand-nth register-set)
+                                 w-register (rand-nth register-set)
+                                 w-register-value (+ threshold @v) ;makes value unique across all threads
+                                 ]
+                            (swap! v inc)
+                            [[:r r-register nil] [:append w-register w-register-value]]
+                            )
+                          :single-ww-mix
+                          (let [
+                                 w1-register (rand-nth register-set)
+                                 w2-register (rand-nth register-set)
+                                 w1-register-value (+ threshold @v) ;makes value unique across all threads
+                                 w2-register-value (+ threshold (swap! v inc)) ;makes value unique across all threads
+                                 ]
+                            (swap! v inc)
+                            [[:append w1-register w1-register-value] [:append w2-register w2-register-value]]
+                            )
+                          )
+
               op (make-op {:type :invoke
                            :process my-process
                            :value value
@@ -295,12 +417,15 @@
                           corrected-time)
               new-op (make-op (case f
                                     :read (la-read session prepared-read op)
-                                    :write (la-write session write-stmt op)
+                                    :write (la-write session write-stmt-tmpl op)
+                                    :single-rr-mix (la-single-rr-mix session prepared-single-rr-mix op)
+                                    :single-rw-mix (la-single-rw-mix session single-rw-mix-stmt-tmpl op)
+                                    :single-ww-mix (la-single-ww-mix session single-ww-mix-stmt-tmpl op)
                                     )
                               corrected-time)
               ]
           (when (< n count)
-                (recur (inc n) (if (= :info (:type new-op))
+                (recur (inc n) v (if (= :info (:type new-op))
                                  (swap! process-counter inc)
                                  my-process))
                 )
@@ -456,7 +581,7 @@
             INSERT INTO rw_registers(id, contents) VALUES (?, ?);
           COMMIT TRANSACTION;"
                                        )
-          threshold (* max-ops-per-tx thread_id count)
+          threshold (* max-ops-per-tx thread_id count) ; max number of values to be used for a single thread; this helps to assign unique values for each thread, so they do not reuse values
           ]
       (loop [n 1
              v (atom 1)
@@ -524,7 +649,8 @@
                                         ))
                                  )
                           )
-              op (make-op {:type :invoke :f "txn"
+              op (make-op {:type :invoke
+                           :f "txn"
                            :process my-process
                            :value value
                            :tid thread_id
@@ -598,9 +724,10 @@
                       operation-count thread-count read-timeout]} options
                       count (quot operation-count thread-count)
                       process-counter (atom 0)
+                      max-ops-per-tx 5
                       modified-start-time (- start-time (linear-time-nanos))]
           (dotimes [thread_id thread-count]
-            (future (do-list-append-writes hosts modified-start-time register-set thread_id count process-counter read-timeout)))
+            (future (do-list-append-writes hosts modified-start-time register-set thread_id count max-ops-per-tx process-counter read-timeout)))
           (shutdown-agents))
       )
       :else
