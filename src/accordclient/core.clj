@@ -240,13 +240,12 @@
 
 (defn la-write
   "Single write to the list-append model"
-  [session stmt-tmpl op]
+  [session pst op]
   (try
     (let [
            register (get-in (:value op) [0 1])
            register-value (get-in (:value op) [0 2])
-           stmt (format stmt-tmpl register-value register)
-           result (alia/execute session stmt)
+           result (alia/execute session pst {:values [[register-value] register]})
            ]
       (if (= [] (-> result first ak))
         (assoc op :type :ok)
@@ -278,14 +277,13 @@
 
 (defn la-single-rw-mix
   "Read followed by write to the list-append model"
-  [session stmt-tmpl op]
+  [session pst op]
   (try
     (let [
            r-register (get-in (:value op) [0 1])
            w-register (get-in (:value op) [1 1])
            w-register-value (get-in (:value op) [1 2])
-           stmt (format stmt-tmpl r-register w-register-value w-register)
-           result (-> (alia/execute session stmt) first ak)
+           result (-> (alia/execute session pst {:values [r-register [w-register-value] w-register]}) first ak)
            ]
       (assoc (assoc-in op [:value 0 2] result) :type :ok)
       )
@@ -297,15 +295,14 @@
 
 (defn la-single-ww-mix
   "Double write to the list-append model"
-  [session stmt-tmpl op]
+  [session pst op]
   (try
     (let [
            register1 (get-in (:value op) [0 1])
            register1-value (get-in (:value op) [0 2])
            register2 (get-in (:value op) [1 1])
            register2-value (get-in (:value op) [1 2])
-           stmt (format stmt-tmpl register1-value register1, register2-value register2)
-           result (alia/execute session stmt)
+           result (alia/execute session pst {:values [[register1-value] register1 [register2-value] register2]})
            ]
       (if (= [] (-> result first ak))
         (assoc op :type :ok)
@@ -330,14 +327,16 @@
             SELECT row.contents;
           COMMIT TRANSACTION;"
                                       )
-          write-stmt-tmpl "
+
+          prepared-write (alia/prepare session "
           BEGIN TRANSACTION
             LET row = (SELECT * FROM list_append WHERE id=0);
             SELECT row.contents;
             IF row IS NULL THEN
-              UPDATE list_append SET contents += [%d] WHERE id = %d;
+              UPDATE list_append SET contents += ? WHERE id = ?;
             END IF
           COMMIT TRANSACTION;"
+                                       )
 
           prepared-single-rr-mix (alia/prepare session "
           BEGIN TRANSACTION
@@ -346,20 +345,22 @@
             SELECT row1.contents,row2.contents;
           COMMIT TRANSACTION;"
                                                )
-          single-rw-mix-stmt-tmpl "
+          prepared-single-rw-mix (alia/prepare session "
           BEGIN TRANSACTION
-            LET row = (SELECT * FROM list_append WHERE id=%d);
+            LET row = (SELECT * FROM list_append WHERE id=?);
             SELECT row.contents;
-            UPDATE list_append SET contents += [%d] WHERE id = %d;
+            UPDATE list_append SET contents += ? WHERE id = ?;
           COMMIT TRANSACTION;"
+                                               )
 
-          single-ww-mix-stmt-tmpl "
+          prepared-single-ww-mix (alia/prepare session "
           BEGIN TRANSACTION
             LET row = (SELECT * FROM list_append WHERE id=0);
             SELECT row.contents;
-            UPDATE list_append SET contents += [%d] WHERE id = %d;
-            UPDATE list_append SET contents += [%d] WHERE id = %d;
+            UPDATE list_append SET contents += ? WHERE id = ?;
+            UPDATE list_append SET contents += ? WHERE id = ?;
           COMMIT TRANSACTION;"
+                                               )
 
           threshold (* max-ops-per-tx thread_id count) ; max number of values to be used for a single thread; this helps to assign unique values for each thread, so they do not reuse values
           ]
@@ -417,10 +418,10 @@
                           corrected-time)
               new-op (make-op (case f
                                     :read (la-read session prepared-read op)
-                                    :write (la-write session write-stmt-tmpl op)
+                                    :write (la-write session prepared-write op)
                                     :single-rr-mix (la-single-rr-mix session prepared-single-rr-mix op)
-                                    :single-rw-mix (la-single-rw-mix session single-rw-mix-stmt-tmpl op)
-                                    :single-ww-mix (la-single-ww-mix session single-ww-mix-stmt-tmpl op)
+                                    :single-rw-mix (la-single-rw-mix session prepared-single-rw-mix op)
+                                    :single-ww-mix (la-single-ww-mix session prepared-single-ww-mix op)
                                     )
                               corrected-time)
               ]
