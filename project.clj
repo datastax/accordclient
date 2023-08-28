@@ -1,4 +1,4 @@
-(defproject accordclient "0.0.4"
+(defproject accordclient "0.0.4-append-to-list-index"
   :description "Performs Accord operations against a Cassandra cluster"
   :url "https://github.com/datastax/accordclient"
   :license {:name "The Apache Software License, Version 2.0"}

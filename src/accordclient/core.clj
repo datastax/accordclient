@@ -247,9 +247,8 @@
            register-value (get-in (:value op) [0 2])
            result (alia/execute session pst {:values [[register-value] register]})
            ]
-      (if (= [] (-> result first ak))
         (assoc op :type :ok)
-        (assoc op :type :fail)))
+      )
     (catch Exception e
       (handle-driver-exceptions e op)
       )
@@ -330,11 +329,7 @@
 
           prepared-write (alia/prepare session "
           BEGIN TRANSACTION
-            LET row = (SELECT * FROM list_append WHERE id=0);
-            SELECT row.contents;
-            IF row IS NULL THEN
-              UPDATE list_append SET contents += ? WHERE id = ?;
-            END IF
+            UPDATE list_append SET contents += ? WHERE id = ?;
           COMMIT TRANSACTION;"
                                        )
 
@@ -367,7 +362,7 @@
       (loop [n 1
              v (atom 1)
              my-process (swap! process-counter inc)]
-        (let [f (rand-nth [:read :write, :single-ww-mix, :single-rr-mix, :single-rw-mix])
+        (let [f (rand-nth [:read :write])
               value (case f
                           :read
                           (let [register (rand-nth register-set)]
