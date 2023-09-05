@@ -24,6 +24,10 @@
     :default 1
     :parse-fn #(Integer/parseInt %)
     :validate [#(< 0 %) "Must be greater than 0"]]
+   [nil "--pause TIME" "Pause time between task execution per thread"
+    :default 0
+    :parse-fn #(Integer/parseInt %)
+    :validate [#(< 0 %) "Must be greater than 0"]]
    ["-s" "--start-time TIME" "Starting relative time in nanoseconds"
     :default 0
     :parse-fn #(Long/parseLong %)]
@@ -148,7 +152,7 @@
 
 (defn do-cas-register-writes
   "Run CAS operations against a cluster and check with Knossos"
-  [hosts time-base register-set upper-bound count process-counter read-timeout]
+  [hosts time-base register-set upper-bound count process-counter read-timeout pause]
   (try
     (let [cluster (alia/cluster {:contact-points hosts, :socket-options {:read-timeout read-timeout}})
           session (alia/connect cluster)
@@ -208,6 +212,7 @@
                                 :write (cas-reg-write session prepared-write prepared-write-not-exists op)
                                 :read (cas-reg-read session prepared-read op))
                               corrected-time)]
+          (Thread/sleep pause)
           (when (< n count)
             (recur (inc n) (if (= :info (:type new-op))
                                (swap! process-counter inc)
@@ -315,7 +320,7 @@
 
 (defn do-list-append-writes
   "Run read-append operations from/to a list against a cluster to check with Elle"
-  [hosts time-base register-set thread_id count max-ops-per-tx process-counter read-timeout]
+  [hosts time-base register-set thread_id count max-ops-per-tx process-counter read-timeout pause]
   (try
     (let [cluster (alia/cluster {:contact-points hosts, :socket-options {:read-timeout read-timeout}})
           session (alia/connect cluster)
@@ -425,6 +430,7 @@
                                     )
                               corrected-time)
               ]
+          (Thread/sleep pause)
           (when (< n count)
                 (recur (inc n) v (if (= :info (:type new-op))
                                  (swap! process-counter inc)
@@ -539,7 +545,7 @@
 
 (defn do-rw-register-writes
   "Run read-write operations from/to a rgister against a cluster to check with Elle"
-  [hosts time-base register-set thread_id count max-ops-per-tx process-counter read-timeout]
+  [hosts time-base register-set thread_id count max-ops-per-tx process-counter read-timeout pause]
   (try
     (let [cluster (alia/cluster {:contact-points hosts, :socket-options {:read-timeout read-timeout} })
           session (alia/connect cluster)
@@ -667,6 +673,7 @@
                                     )
                               corrected-time)
               ]
+          (Thread/sleep pause)
           (when (< n count)
                 (recur (inc n) v (if (= :info (:type new-op))
                                  (swap! process-counter inc)
@@ -698,37 +705,37 @@
       (:print-schema options) (print-schema)
       errors (do (println summary) (println errors) (System/exit 1))
       (:cas-register options) (do
-        (let [{:keys [hosts start-time upper-bound register-set
+        (let [{:keys [hosts start-time upper-bound register-set pause
                       operation-count thread-count read-timeout]} options
                       count (quot operation-count thread-count)
                       process-counter (atom 0)
                       modified-start-time (- start-time (linear-time-nanos))]
           (dotimes [_ thread-count]
-            (future (do-cas-register-writes hosts modified-start-time register-set upper-bound count process-counter read-timeout)))
+            (future (do-cas-register-writes hosts modified-start-time register-set upper-bound count process-counter read-timeout pause)))
           (shutdown-agents))
 
         )
 
       (:rw-register options) (do
-        (let [{:keys [hosts start-time register-set
+        (let [{:keys [hosts start-time register-set pause
                       operation-count thread-count read-timeout]} options
                       count (quot operation-count thread-count)
                       process-counter (atom 0)
                       max-ops-per-tx 5
                       modified-start-time (- start-time (linear-time-nanos))]
           (dotimes [thread_id thread-count]
-            (future (do-rw-register-writes hosts modified-start-time register-set thread_id count max-ops-per-tx process-counter read-timeout)))
+            (future (do-rw-register-writes hosts modified-start-time register-set thread_id count max-ops-per-tx process-counter read-timeout pause)))
           (shutdown-agents))
       )
       (:list-append options) (do
-        (let [{:keys [hosts start-time register-set
+        (let [{:keys [hosts start-time register-set pause
                       operation-count thread-count read-timeout]} options
                       count (quot operation-count thread-count)
                       process-counter (atom 0)
                       max-ops-per-tx 5
                       modified-start-time (- start-time (linear-time-nanos))]
           (dotimes [thread_id thread-count]
-            (future (do-list-append-writes hosts modified-start-time register-set thread_id count max-ops-per-tx process-counter read-timeout)))
+            (future (do-list-append-writes hosts modified-start-time register-set thread_id count max-ops-per-tx process-counter read-timeout pause)))
           (shutdown-agents))
       )
       :else
